@@ -116,7 +116,7 @@ async def process_item_date(message: Message, state: FSMContext):
                 user_id=user_id,
                 name=item_name,
                 expires_at=exp_date,
-                notified_14_days=0
+                notify_stage=0
             ))
             await session.commit()
     except IntegrityError:
@@ -184,14 +184,21 @@ async def render_delete_menu(message: Message, user_id: int):
         await message.edit_text("📦 Ваш список товаров пока пуст.", reply_markup=back_keyboard())
         return
 
+    def short(name: str, limit: int = 16) -> str:
+        return name if len(name) <= limit else name[:limit - 1] + "…"
+
     buttons = [
-        [InlineKeyboardButton(text=f"❌ {item.name[:40]}", callback_data=f"del_item_{item.id}")]
+        InlineKeyboardButton(text=f"❌ {short(item.name)}", callback_data=f"del_item_{item.id}")
         for item in items
     ]
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="btn_items")])
+
+    # по 2 кнопки в ряд
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="btn_items")])
+
     await message.edit_text(
         "Выберите товар для удаления:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
     )
 
 

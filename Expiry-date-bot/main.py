@@ -18,6 +18,12 @@ from handlers import start, items, clear
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Стадии напоминаний (хранятся в ItemModel.notify_stage)
+STAGE_NONE = 0   # ничего не отправлено
+STAGE_14 = 1     # за 14 дней и меньше
+STAGE_7 = 2      # за 7 дней и меньше
+STAGE_DAY = 3    # в день истечения (или срок уже вышел)
+
 
 # --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 async def handle(request):
@@ -35,30 +41,53 @@ async def web_server():
     await site.start()
 
 
+# --- ЛОГИКА НАПОМИНАНИЙ ---
+def stage_for(delta: int) -> int:
+    """Какая стадия напоминания соответствует количеству дней до срока."""
+    if delta <= 0:
+        return STAGE_DAY
+    if delta <= 7:
+        return STAGE_7
+    if delta <= 14:
+        return STAGE_14
+    return STAGE_NONE
+
+
+def build_message(name: str, date_str: str, delta: int, stage: int) -> str:
+    if delta < 0:
+        return f"❌ <b>Просрочка!</b> У товара <b>«{name}»</b> истек срок годности {date_str}!"
+    if delta == 0:
+        return f"🚨 <b>Внимание!</b> У товара <b>«{name}»</b> срок годности истекает <b>сегодня</b> ({date_str})!"
+    if stage == STAGE_7:
+        return f"⏰ <b>Скоро срок!</b> У товара <b>«{name}»</b> осталось {delta} дн. (годен до {date_str})."
+    return f"⚠️ <b>Внимание!</b> У товара <b>«{name}»</b> истекает срок годности через {delta} дн. (годен до {date_str})."
+
+
 # --- ФОНОВАЯ ПРОВЕРКА СРОКОВ ГОДНОСТИ ---
 async def check_expiring_items(bot: Bot):
     today = datetime.now(TZ).date()
 
     async with async_session_maker() as session:
+        # Товары, по которым ещё не отправлена финальная стадия
         result = await session.execute(
-            select(ItemModel).where(ItemModel.notified_14_days == 0)
+            select(ItemModel).where(ItemModel.notify_stage < STAGE_DAY)
         )
         pending = result.scalars().all()
 
         for item in pending:
             delta = (item.expires_at - today).days
-            if delta > 14:
+            stage = stage_for(delta)
+
+            # Либо ещё рано, либо эта стадия уже отправлялась
+            if stage <= item.notify_stage:
                 continue
 
-            name = html.escape(item.name)
-            date_str = item.expires_at.strftime("%d.%m.%Y")
-
-            if delta > 0:
-                msg = f"⚠️ <b>Внимание!</b> У товара <b>«{name}»</b> истекает срок годности через {delta} дн. (годен до {date_str})."
-            elif delta == 0:
-                msg = f"🚨 <b>Внимание!</b> У товара <b>«{name}»</b> срок годности истекает <b>сегодня</b> ({date_str})!"
-            else:
-                msg = f"❌ <b>Просрочка!</b> У товара <b>«{name}»</b> истек срок годности {date_str}!"
+            msg = build_message(
+                html.escape(item.name),
+                item.expires_at.strftime("%d.%m.%Y"),
+                delta,
+                stage,
+            )
 
             try:
                 await bot.send_message(item.user_id, msg, parse_mode="HTML")
@@ -67,9 +96,9 @@ async def check_expiring_items(bot: Bot):
                 logger.warning("User %s blocked the bot, skipping notification", item.user_id)
             except Exception:
                 logger.exception("Failed to notify user %s about item %s", item.user_id, item.id)
-                continue  # флаг не ставим, попробуем при следующей проверке
+                continue  # стадию не сохраняем, попробуем при следующей проверке
 
-            item.notified_14_days = 1
+            item.notify_stage = stage
             await session.commit()
 
 
