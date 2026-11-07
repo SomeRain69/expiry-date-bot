@@ -1,8 +1,8 @@
 aiogram>=3.0
-sqlalchemy[asyncio]
+sqlalchemy[asyncio]>=2.0
+asyncpg
 aiohttp
-apscheduler
-pydantic
+apscheduler>=3.10,<4
 pydantic-settings
-aiosqlite
 greenlet
+tzdata

@@ -1,15 +1,22 @@
 import asyncio
+import html
+import logging
 import os
+from datetime import datetime
+
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramForbiddenError
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select
-from datetime import datetime
 
-from config import config
+from config import config, TZ
 from database.database import init_db, async_session_maker
-from handlers import start, items, clear
 from database.models import ItemModel
+from handlers import start, items, clear
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 # --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
@@ -30,31 +37,47 @@ async def web_server():
 
 # --- ФОНОВАЯ ПРОВЕРКА СРОКОВ ГОДНОСТИ ---
 async def check_expiring_items(bot: Bot):
+    today = datetime.now(TZ).date()
+
     async with async_session_maker() as session:
-        result = await session.execute(select(ItemModel))
-        items_list = result.scalars().all()
+        result = await session.execute(
+            select(ItemModel).where(ItemModel.notified_14_days == 0)
+        )
+        pending = result.scalars().all()
 
-        today = datetime.now().date()
-        for item in items_list:
-            if item.expires_at:
-                try:
-                    exp_date = item.expires_at
-                    delta = (exp_date - today).days
+        for item in pending:
+            delta = (item.expires_at - today).days
+            if delta > 14:
+                continue
 
-                    if delta <= 14 and item.notified_14_days == 0:
-                        if delta > 0:
-                            msg = f"⚠️ <b>Внимание!</b> У товара <b>«{item.name}»</b> истекает срок годности через {delta} дн. (годен до {exp_date.strftime('%d.%m.%Y')})."
-                        elif delta == 0:
-                            msg = f"🚨 <b>Внимание!</b> У товара <b>«{item.name}»</b> срок годности истекает <b>сегодня</b> ({exp_date.strftime('%d.%m.%Y')})!"
-                        else:
-                            msg = f"❌ <b>Просрочка!</b> У товара <b>«{item.name}»</b> истек срок годности {exp_date.strftime('%d.%m.%Y')}!"
+            name = html.escape(item.name)
+            date_str = item.expires_at.strftime("%d.%m.%Y")
 
-                        await bot.send_message(item.user_id, msg, parse_mode="HTML")
-                        item.notified_14_days = 1
-                        await session.commit()
-                except Exception:
-                    # Безопасно пропускаем, если пользователь заблокировал бота
-                    pass
+            if delta > 0:
+                msg = f"⚠️ <b>Внимание!</b> У товара <b>«{name}»</b> истекает срок годности через {delta} дн. (годен до {date_str})."
+            elif delta == 0:
+                msg = f"🚨 <b>Внимание!</b> У товара <b>«{name}»</b> срок годности истекает <b>сегодня</b> ({date_str})!"
+            else:
+                msg = f"❌ <b>Просрочка!</b> У товара <b>«{name}»</b> истек срок годности {date_str}!"
+
+            try:
+                await bot.send_message(item.user_id, msg, parse_mode="HTML")
+            except TelegramForbiddenError:
+                # Пользователь заблокировал бота: повторять отправку бессмысленно
+                logger.warning("User %s blocked the bot, skipping notification", item.user_id)
+            except Exception:
+                logger.exception("Failed to notify user %s about item %s", item.user_id, item.id)
+                continue  # флаг не ставим, попробуем при следующей проверке
+
+            item.notified_14_days = 1
+            await session.commit()
+
+
+async def safe_check(bot: Bot):
+    try:
+        await check_expiring_items(bot)
+    except Exception:
+        logger.exception("Expiry check failed")
 
 
 # --- ГЛАВНАЯ ФУНКЦИЯ ---
@@ -69,13 +92,19 @@ async def main():
     await init_db()
 
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
-    scheduler.add_job(check_expiring_items, "interval", hours=6, args=(bot,))  # Проверка раз в 6 часов
+    scheduler.add_job(safe_check, "cron", hour=9, minute=0, args=(bot,))  # раз в день в 09:00
     scheduler.start()
 
     await web_server()
 
+    # Проверка сразу при старте, чтобы не ждать до утра (например, после перезапуска на Render)
+    startup_check = asyncio.create_task(safe_check(bot))
+
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        startup_check.cancel()
 
 
 if __name__ == "__main__":
