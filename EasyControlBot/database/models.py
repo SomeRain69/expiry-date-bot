@@ -1,6 +1,6 @@
-from sqlalchemy import Column
-from sqlalchemy import Integer, String
-from sqlalchemy.orm import DeclarativeBase
+from datetime import date
+from sqlalchemy import Integer, String, BigInteger, Date, UniqueConstraint
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 class Base(DeclarativeBase):
     pass
@@ -8,8 +8,12 @@ class Base(DeclarativeBase):
 class ItemModel(Base):
     __tablename__ = "items"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer)
-    name = Column(String, unique=True, nullable=False)
-    expires_at = Column(String, nullable=True)
-    notified_14_days = Column(Integer, default=0)
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_user_item_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    expires_at: Mapped[date] = mapped_column(Date, nullable=False)
+    notified_14_days: Mapped[int] = mapped_column(Integer, default=0)

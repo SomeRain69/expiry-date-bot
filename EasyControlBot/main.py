@@ -28,7 +28,6 @@ async def web_server():
     await site.start()
 
 
-
 # --- ФОНОВАЯ ПРОВЕРКА СРОКОВ ГОДНОСТИ ---
 async def check_expiring_items(bot: Bot):
     async with async_session_maker() as session:
@@ -39,21 +38,22 @@ async def check_expiring_items(bot: Bot):
         for item in items_list:
             if item.expires_at:
                 try:
-                    exp_date = datetime.strptime(item.expires_at, "%d.%m.%Y").date()
+                    exp_date = item.expires_at
                     delta = (exp_date - today).days
 
                     if delta <= 14 and item.notified_14_days == 0:
                         if delta > 0:
-                            msg = f"⚠️ <b>Внимание!</b> У товара <b>«{item.name}»</b> истекает срок годности через {delta} дн. (годен до {item.expires_at})."
+                            msg = f"⚠️ <b>Внимание!</b> У товара <b>«{item.name}»</b> истекает срок годности через {delta} дн. (годен до {exp_date.strftime('%d.%m.%Y')})."
                         elif delta == 0:
-                            msg = f"🚨 <b>Внимание!</b> У товара <b>«{item.name}»</b> срок годности истекает <b>сегодня</b> ({item.expires_at})!"
+                            msg = f"🚨 <b>Внимание!</b> У товара <b>«{item.name}»</b> срок годности истекает <b>сегодня</b> ({exp_date.strftime('%d.%m.%Y')})!"
                         else:
-                            msg = f"❌ <b>Просрочка!</b> У товара <b>«{item.name}»</b> истек срок годности {item.expires_at}!"
+                            msg = f"❌ <b>Просрочка!</b> У товара <b>«{item.name}»</b> истек срок годности {exp_date.strftime('%d.%m.%Y')}!"
 
                         await bot.send_message(item.user_id, msg, parse_mode="HTML")
                         item.notified_14_days = 1
                         await session.commit()
                 except Exception:
+                    # Безопасно пропускаем, если пользователь заблокировал бота
                     pass
 
 
@@ -69,7 +69,7 @@ async def main():
     await init_db()
 
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
-    scheduler.add_job(check_expiring_items, "interval", seconds=30, args=(bot,))
+    scheduler.add_job(check_expiring_items, "interval", hours=6, args=(bot,))  # Проверка раз в 6 часов
     scheduler.start()
 
     await web_server()

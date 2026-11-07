@@ -1,16 +1,16 @@
+import html
+from datetime import datetime
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy import select, delete
-from datetime import datetime
+from sqlalchemy import select
 
 from database.database import async_session_maker
 from database.models import ItemModel
 from handlers.start import get_main_menu_keyboard
 
 router = Router()
-
 
 class AddItemState(StatesGroup):
     waiting_for_name = State()
@@ -28,7 +28,7 @@ async def start_add_item(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.message(AddItemState.waiting_for_name)
+@router.message(AddItemState.waiting_for_name, F.text)
 async def process_item_name(message: Message, state: FSMContext):
     item_name = message.text.strip()
     user_id = message.from_user.id
@@ -41,7 +41,7 @@ async def process_item_name(message: Message, state: FSMContext):
 
         if existing_item:
             await message.answer(
-                f"❌ Товар с названием <b>«{item_name}»</b> уже есть в вашей базе!",
+                f"❌ Товар с названием <b>«{html.escape(item_name)}»</b> уже есть в вашей базе!",
                 parse_mode="HTML"
             )
             return
@@ -56,7 +56,7 @@ async def process_item_name(message: Message, state: FSMContext):
 
 
 # Шаг 2: Ввод даты и сохранение товара в базу
-@router.message(AddItemState.waiting_for_date)
+@router.message(AddItemState.waiting_for_date, F.text)
 async def process_item_date(message: Message, state: FSMContext):
     date_text = message.text.strip()
 
@@ -84,28 +84,29 @@ async def process_item_date(message: Message, state: FSMContext):
         new_item = ItemModel(
             user_id=user_id,
             name=item_name,
-            expires_at=date_text,
+            expires_at=exp_date,
             notified_14_days=0
         )
         session.add(new_item)
         await session.commit()
 
-    # Очищаем состояние и отправляем подтверждение с клавиатурой меню
     await state.clear()
     await message.answer(
-        f"✅ Товар <b>«{item_name}»</b> (годен до {date_text}) успешно добавлен!",
+        f"✅ Товар <b>«{html.escape(item_name)}»</b> (годен до {date_text}) успешно добавлен!",
         reply_markup=get_main_menu_keyboard(),
         parse_mode="HTML"
     )
 
 
-# Просмотр списка товаров с кнопками удаления
+# Просмотр списка товаров (текст отдельно, кнопка управления отдельно)
 @router.callback_query(F.data == "btn_items")
 async def show_items(callback: CallbackQuery):
     user_id = callback.from_user.id
     async with async_session_maker() as session:
         result = await session.execute(
-            select(ItemModel).where(ItemModel.user_id == user_id)
+            select(ItemModel)
+            .where(ItemModel.user_id == user_id)
+            .order_by(ItemModel.expires_at.asc())
         )
         items = result.scalars().all()
 
@@ -113,33 +114,19 @@ async def show_items(callback: CallbackQuery):
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="btn_back_to_menu")]
             ])
-            await callback.message.answer("📦 Ваш список товаров пока пуст.", reply_markup=keyboard)
+            await callback.message.edit_text("📦 Ваш список товаров пока пуст.", reply_markup=keyboard)
             await callback.answer()
             return
 
-        keyboard_buttons = []
         text = "📋 <b>Ваши товары:</b>\n\n"
         for item in items:
-            text += f"▪️ <b>{item.name}</b> — годен до {item.expires_at}\n"
-            keyboard_buttons.append([
-                InlineKeyboardButton(text=f"❌ Удалить: {item.name}", callback_data=f"del_item_{item.id}")
-            ])
+            safe_name = html.escape(item.name)
+            text += f"▪️ <b>{safe_name}</b> — годен до {item.expires_at.strftime('%d.%m.%Y')}\n"
 
-        keyboard_buttons.append([InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="btn_back_to_menu")])
-        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🗑 Удалить товар", callback_data="start_delete_menu")],
+            [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="btn_back_to_menu")]
+        ])
 
-        await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
         await callback.answer()
-
-
-# Удаление конкретного товара
-@router.callback_query(F.data.startswith("del_item_"))
-async def delete_single_item(callback: CallbackQuery):
-    item_id = int(callback.data.split("_")[2])
-    async with async_session_maker() as session:
-        await session.execute(delete(ItemModel).where(ItemModel.id == item_id))
-        await session.commit()
-
-    await callback.message.answer("🗑 Товар успешно удален из базы!")
-    await callback.answer()
-    await show_items(callback)
