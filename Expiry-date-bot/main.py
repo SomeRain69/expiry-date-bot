@@ -12,8 +12,9 @@ from sqlalchemy import select
 
 from config import config, TZ
 from database.database import init_db, async_session_maker
-from database.models import ItemModel
-from handlers import start, items, clear
+from database.models import BotUser, ItemModel
+from handlers import admin, start, items, clear
+from middlewares import AccessMiddleware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -79,6 +80,10 @@ async def check_expiring_items(bot: Bot):
     today = datetime.now(TZ).date()
 
     async with async_session_maker() as session:
+        # Заблокированным пользователям напоминания не отправляем
+        banned_result = await session.execute(select(BotUser.user_id).where(BotUser.is_banned.is_(True)))
+        banned_ids = set(banned_result.scalars().all())
+
         # Берём только товары, до срока которых 14 дней или меньше (включая просроченные)
         result = await session.execute(
             select(ItemModel).where(ItemModel.expires_at <= today + timedelta(days=14))
@@ -86,6 +91,9 @@ async def check_expiring_items(bot: Bot):
         candidates = result.scalars().all()
 
         for item in candidates:
+            if item.user_id in banned_ids:
+                continue
+
             delta = (item.expires_at - today).days
             stage = stage_for(delta)
 
@@ -129,6 +137,12 @@ async def main():
     bot = Bot(token=config.bot_token)
     dp = Dispatcher()
 
+    # Проверка доступа выполняется для каждого сообщения и нажатия кнопки
+    access = AccessMiddleware()
+    dp.message.outer_middleware(access)
+    dp.callback_query.outer_middleware(access)
+
+    dp.include_router(admin.router)
     dp.include_router(start.router)
     dp.include_router(items.router)
     dp.include_router(clear.router)
