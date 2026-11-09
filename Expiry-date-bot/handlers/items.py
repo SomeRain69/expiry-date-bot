@@ -5,7 +5,7 @@ from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from sqlalchemy import select, delete
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from config import TZ
@@ -96,7 +96,7 @@ async def process_item_date(message: Message, state: FSMContext):
     today = datetime.now(TZ).date()
     if exp_date < today:
         await message.answer(
-            "⚠️ Этот товар уже <b>просрочен</b>! Нельзя добавить товар с истекшим сроком годности.",
+            "⚠️ Этот товар уже <b>просрочен</b>! Нельзя добавить товар с истекшим сроком годности, попробуйте снова.",
             parse_mode="HTML"
         )
         return
@@ -222,14 +222,26 @@ async def delete_single_item(callback: CallbackQuery):
         return
 
     async with async_session_maker() as session:
-        # Проверяем владельца: нельзя удалить чужой товар
-        await session.execute(
-            delete(ItemModel).where(
+        # Ищем товар сразу с проверкой владельца: чужой товар удалить нельзя
+        result = await session.execute(
+            select(ItemModel).where(
                 ItemModel.id == item_id,
                 ItemModel.user_id == callback.from_user.id
             )
         )
+        item = result.scalar_one_or_none()
+
+        if item is None:
+            # Уже удалён (например, повторное нажатие) или не принадлежит пользователю
+            await callback.answer("Этот товар уже удалён")
+            return
+
+        item_name = item.name
+        await session.delete(item)
         await session.commit()
 
     await render_delete_menu(callback.message, callback.from_user.id)
-    await callback.answer("🗑 Товар удалён")
+
+    # Текст всплывающего уведомления в Telegram ограничен, поэтому длинное название обрезаем
+    shown_name = item_name if len(item_name) <= 60 else item_name[:59] + "…"
+    await callback.answer(f"🗑 «{shown_name}» удалено")
